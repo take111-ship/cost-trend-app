@@ -42,9 +42,9 @@ USD/ton × USD/JPY ÷ 1000 = 円/kg
 
 with st.expander("このダッシュボードについて", expanded=True):
     st.markdown("""
-- **目的**：原材料（銅・アルミ）＋（今後：輸送費・賃金）の原価感を“月次で”つかむ  
-- **計算**：USD/ton × USDJPY ÷ 1000 = **円/kg**  
+- **目的**：原材料（銅・アルミ）＋（輸送費・賃金）の原価感を“月次で”つかむ  
 - **見方**：グラフは **最新月を強調表示**、KPIは **前月比** つき  
+- **注意**：輸送費・賃金は公開統計の仕様変更で取得できない場合があります（その場合は警告表示）
 """)
 
 # ----------------------------
@@ -55,7 +55,7 @@ if not FRED_API_KEY:
     st.error("FRED_API_KEY が設定されていません（Streamlit Secretsを確認してください）")
     st.stop()
 
-# e-Stat（あなたのSecretsは ESTAT_APP_ID に統一）
+# e-Stat（キー名は ESTAT_APP_ID に統一）
 ESTAT_APP_ID = st.secrets.get("ESTAT_APP_ID", "")
 if not ESTAT_APP_ID:
     st.warning("ESTAT_APP_ID が未設定です（賃金の取得をスキップします）")
@@ -102,19 +102,17 @@ def fetch_estat_statsdata(stats_data_id: str, limit: int = 100000) -> dict:
 
 def estat_pick_series(json_data: dict, industry_label_contains="製造業", item_label_contains=None) -> pd.Series:
     """
-    返ってきたJSONから、ラベル条件（例：製造業）を含むコードを推定して
+    返ってきたJSONからラベル条件（例：製造業）を含むコードを推定して
     ざっくり時系列Seriesを作る（まずは“動く”優先の抽出）。
     """
     gsd = json_data.get("GET_STATS_DATA", {})
     if "STATISTICAL_DATA" not in gsd:
-        # 失敗時は空Series
         return pd.Series(dtype="float64")
 
     root = gsd["STATISTICAL_DATA"]
     class_inf = root["CLASS_INF"]["CLASS_OBJ"]
     values = root["DATA_INF"]["VALUE"]
 
-    # CLASS_OBJ を name→{code:label} に整形
     def to_map(obj):
         cls = obj["CLASS"]
         if isinstance(cls, dict):
@@ -123,10 +121,8 @@ def estat_pick_series(json_data: dict, industry_label_contains="製造業", item
 
     class_maps = {obj["@id"]: to_map(obj) for obj in class_inf}
 
-    # ラベルを含むコード候補
     industry_codes = set()
     item_codes = set()
-
     for _, cmap in class_maps.items():
         for code, name in cmap.items():
             if industry_label_contains and industry_label_contains in name:
@@ -159,66 +155,92 @@ def estat_pick_series(json_data: dict, industry_label_contains="製造業", item
         data=[x[1] for x in rows],
         index=pd.to_datetime([x[0] for x in rows], errors="coerce")
     ).dropna().sort_index()
-
-    # 同月重複は最後を採用
     s = s[~s.index.duplicated(keep="last")]
     return s
 
 # ----------------------------
-# WebKIT (PDF) fetch
+# WebKIT latest PDF finder + PDF parser
 # ----------------------------
 @st.cache_data(ttl=60 * 60)
+def get_latest_webkit_pdf_url() -> str:
+    """
+    全ト協のWebKITリリースページから最新PDF URLを探す
+    """
+    from bs4 import BeautifulSoup  # requirements: beautifulsoup4
+
+    page_url = "https://jta.or.jp/member/keiei/kit_release.html"
+    html = requests.get(page_url, timeout=30).text
+    soup = BeautifulSoup(html, "html.parser")
+
+    pdf_links = []
+    for a in soup.find_all("a"):
+        href = a.get("href") or ""
+        if "/pdf/kit_release/" in href and href.endswith(".pdf"):
+            if href.startswith("http"):
+                pdf_links.append(href)
+            else:
+                pdf_links.append("https://jta.or.jp" + href)
+
+    if not pdf_links:
+        raise ValueError("WebKIT PDFリンクが見つかりませんでした（ページ構造変更の可能性）")
+
+    def key(u: str) -> str:
+        m = re.search(r"/(\d{6})\.pdf$", u)
+        return m.group(1) if m else "000000"
+
+    pdf_links = sorted(set(pdf_links), key=key, reverse=True)
+    return pdf_links[0]
+
+@st.cache_data(ttl=60 * 60)
 def fetch_webkit_index_from_pdf(pdf_url: str) -> pd.Series:
-    import pdfplumber  # requirements.txt に pdfplumber を追加してね
+    """
+    PDFから指数っぽい数列（最大12個）を拾って、直近12ヶ月の時系列にする
+    ※PDFの形式変更に弱いので、ダメなら warning 表示で止める
+    """
+    import pdfplumber  # requirements: pdfplumber
 
     r = requests.get(pdf_url, timeout=60)
     r.raise_for_status()
 
+    candidates = []
+
     with pdfplumber.open(io.BytesIO(r.content)) as pdf:
-        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        for page in pdf.pages:
+            # 1) 表抽出を優先
+            tables = page.extract_tables() or []
+            for tbl in tables:
+                if not tbl:
+                    continue
+                joined = " ".join([" ".join([c or "" for c in row]) for row in tbl])
+                if "月" not in joined and "指数" not in joined and "成約" not in joined:
+                    continue
+                for row in tbl:
+                    row_text = " ".join([c or "" for c in row])
+                    nums = re.findall(r"\b\d{2,3}\b", row_text)
+                    if len(nums) >= 8:
+                        candidates.append(nums)
 
-    # 年度行っぽい行を拾う
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    rows = [ln for ln in lines if ("令和" in ln and "年度" in ln) or ("平成" in ln and "年度" in ln)]
+            # 2) テキスト抽出（保険）
+            text = page.extract_text() or ""
+            for ln in text.splitlines():
+                nums = re.findall(r"\b\d{2,3}\b", ln)
+                if len(nums) >= 8 and ("指数" in ln or "成約" in text or "運賃" in text):
+                    candidates.append(nums)
 
-    data = []
-    for ln in rows:
-        # 例： "令和７年度 137 135 131 ..." みたいな並びを想定
-        nums = re.findall(r"\b\d+\b", ln)
-        if len(nums) < 3:
-            continue
-
-        m = re.search(r"(令和|平成)\s*([0-9]+)\s*年度", ln)
-        if not m:
-            # スペース無しの "令和７年度" も拾う
-            m = re.search(r"(令和|平成)([0-9]+)年度", ln)
-        if not m:
-            continue
-
-        era = m.group(1)
-        n = int(m.group(2))
-        values = list(map(int, nums))[:12]  # 4月〜3月の最大12個を想定
-        data.append((era, n, values))
-
-    series = []
-    for era, n, vals in data:
-        if era == "令和":
-            start_year = 2018 + n  # 令和1=2019 → 2018+1
-        else:
-            start_year = 1988 + n  # 平成1=1989 → 1988+1
-
-        months = list(range(4, 13)) + [1, 2, 3]
-        years = [start_year] * 9 + [start_year + 1] * 3
-
-        for y, mo, v in zip(years, months, vals):
-            series.append((pd.Timestamp(y, mo, 1), v))
-
-    if not series:
+    if not candidates:
         return pd.Series(dtype="float64")
 
-    s = pd.Series({d: v for d, v in series}).sort_index()
-    s = s[~s.index.duplicated(keep="last")]
-    return s
+    nums = max(candidates, key=len)
+    nums = list(map(int, nums))[:12]
+
+    m = re.search(r"/(\d{6})\.pdf$", pdf_url)
+    if not m:
+        return pd.Series(dtype="float64")
+
+    yyyymm = m.group(1)
+    base = pd.to_datetime(yyyymm + "01", format="%Y%m%d")
+    idx = pd.date_range(end=base, periods=len(nums), freq="MS")
+    return pd.Series(nums, index=idx).sort_index()
 
 # ----------------------------
 # Build base df (Copper/Aluminum)
@@ -276,7 +298,6 @@ st.divider()
 def plot_with_latest_highlight(series: pd.Series, title: str, y_label: str):
     fig, ax = plt.subplots()
     ax.plot(series.index, series.values)
-
     ax.scatter(series.index[-1], series.values[-1], s=80, zorder=3)
     ax.annotate(
         f"{series.values[-1]:,.0f}",
@@ -285,7 +306,6 @@ def plot_with_latest_highlight(series: pd.Series, title: str, y_label: str):
         xytext=(8, 8),
         ha="left",
     )
-
     ax.set_title(title)
     ax.set_xlabel("Month")
     ax.set_ylabel(y_label)
@@ -316,11 +336,10 @@ with tab4:
     if not ESTAT_APP_ID:
         st.info("ESTAT_APP_ID が未設定のため、賃金データは表示しません。")
     else:
-        # あなたのe-Stat URLにあった stat_infid を statsDataId として試す
+        # あなたが貼ってくれたURLの stat_infid を statsDataId として試す
         stats_data_id = "000040277086"
         estat_json = fetch_estat_statsdata(stats_data_id)
 
-        # 失敗時に理由を表示（赤塗り対策）
         gsd = estat_json.get("GET_STATS_DATA", {})
         if "STATISTICAL_DATA" not in gsd:
             st.error("e-Stat APIが STATISTICAL_DATA を返していません（取得失敗）")
@@ -339,16 +358,17 @@ with tab4:
 
 with tab5:
     st.subheader("国内トラック運賃指数（WebKIT 成約運賃指数）")
-    pdf_url = "https://jta.or.jp/pdf/kit_release/202512.pdf"  # まずは固定で動作確認
     try:
+        pdf_url = get_latest_webkit_pdf_url()
+        st.caption(f"取得元PDF: {pdf_url}")
+
         webkit = fetch_webkit_index_from_pdf(pdf_url)
         if webkit.empty:
-            st.warning("PDFから指数を抽出できませんでした（PDF形式が変わっている可能性）")
+            st.warning("PDFから指数を抽出できませんでした（PDF形式変更の可能性）")
         else:
             st.line_chart(webkit.rename("webkit_freight_index"))
-            st.caption(f"出典PDF：{pdf_url}")
     except Exception as e:
-        st.error("PDFの取得/解析でエラーになりました。requirements.txt に pdfplumber が入っているか確認してください。")
+        st.error("取得処理でエラーが発生しました")
         st.write(str(e))
 
 st.divider()
@@ -357,7 +377,6 @@ st.divider()
 # Data table + download (Copper/Aluminum)
 # ----------------------------
 st.subheader("📄 データ（ダウンロード：銅・アルミ）")
-
 download_df = df[["copper_jpy_kg", "aluminum_jpy_kg"]].copy()
 download_df = download_df.rename(
     columns={
@@ -377,4 +396,3 @@ st.download_button(
     file_name="copper_aluminum_jpy_per_kg_monthly.csv",
     mime="text/csv",
 )
-
