@@ -330,3 +330,60 @@ if wage_mfg.empty:
 else:
     st.line_chart(wage_mfg.rename("wage_index_mfg"))
 
+import io
+import pdfplumber
+
+def fetch_webkit_index_from_pdf(pdf_url: str):
+    r = requests.get(pdf_url, timeout=60)
+    r.raise_for_status()
+
+    with pdfplumber.open(io.BytesIO(r.content)) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+    # 「成約運賃指数（月別）の推移」テーブル周辺を使う
+    # 例: "令和７年度 137 135 131 135 143 138 137 141 146"
+    # 年度行を拾って、年度→4月〜3月の値に変換
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    rows = [ln for ln in lines if ln.startswith("令和") or ln.startswith("平成")]
+
+    data = []
+    for ln in rows:
+        # 年度名 + 数字を拾う
+        nums = re.findall(r"\b\d+\b", ln)
+        if len(nums) < 3:
+            continue
+        year_label = ln.split()[0]  # "令和７年度" など
+        values = list(map(int, nums))  # 100 98 ... の部分
+        # 4月〜3月（最大12個）として扱う
+        values = values[:12]
+        data.append((year_label, values))
+
+    # 年度→月へ展開（ざっくり：年度は4月スタート）
+    # "令和７年度" → 2025年度（令和7=2025）なので 2025-04〜
+    series = []
+    for year_label, vals in data:
+        m = re.search(r"(令和|平成)(\d+)年度", year_label)
+        if not m:
+            continue
+        era, n = m.group(1), int(m.group(2))
+        if era == "令和":
+            start_year = 2018 + n  # 令和1=2019 → 2018+1
+        else:
+            start_year = 1988 + n  # 平成1=1989 → 1988+1
+        # 4月〜12月（9個）+ 1月〜3月（3個）
+        months = list(range(4, 13)) + [1, 2, 3]
+        years = [start_year]*9 + [start_year+1]*3
+        for y, mo, v in zip(years, months, vals):
+            series.append((pd.Timestamp(y, mo, 1), v))
+
+    s = pd.Series({d: v for d, v in series}).sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    return s
+
+st.subheader("国内トラック運賃指数（WebKIT 成約運賃指数）")
+# 最新のPDF（例：2025年12月分のPDF）:contentReference[oaicite:9]{index=9}
+webkit = fetch_webkit_index_from_pdf("https://jta.or.jp/pdf/kit_release/202512.pdf")
+st.line_chart(webkit.rename("webkit_freight_index"))
+
+
+
