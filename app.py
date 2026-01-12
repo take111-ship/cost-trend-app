@@ -264,6 +264,14 @@ def fetch_estat_statsdata(stats_data_id: str, limit: int = 100000):
     r = requests.get(url, params=params, timeout=60)
     r.raise_for_status()
     return r.json()
+gsd = estat_json.get("GET_STATS_DATA", {})
+if "STATISTICAL_DATA" not in gsd:
+    st.error("e-Stat APIが STATISTICAL_DATA を返していません（取得失敗）")
+    st.write("GET_STATS_DATA keys:", list(gsd.keys()))
+    st.write("RESULT:", gsd.get("RESULT"))
+    st.write("ERROR_MSG:", gsd.get("ERROR_MSG"))
+    st.stop()
+
 
 def estat_pick_series(json_data, industry_label_contains="製造業", item_label_contains="賃金指数"):
     """
@@ -321,7 +329,7 @@ def estat_pick_series(json_data, industry_label_contains="製造業", item_label
     return s
 
 # ---- ここで実際に取得（例のstatsDataId）----
-estat_json = fetch_estat_statsdata("000008232508")  # 毎月勤労統計調査（産業別賃金指数の例）:contentReference[oaicite:6]{index=6}
+estat_json = fetch_estat_statsdata("000040277086")  # 毎月勤労統計調査（産業別賃金指数の例）:contentReference[oaicite:6]{index=6}
 wage_mfg = estat_pick_series(estat_json, industry_label_contains="製造業", item_label_contains="賃金指数")
 
 st.subheader("製造業の賃金指標（e-Stat）")
@@ -384,6 +392,7 @@ st.subheader("国内トラック運賃指数（WebKIT 成約運賃指数）")
 # 最新のPDF（例：2025年12月分のPDF）:contentReference[oaicite:9]{index=9}
 webkit = fetch_webkit_index_from_pdf("https://jta.or.jp/pdf/kit_release/202512.pdf")
 st.line_chart(webkit.rename("webkit_freight_index"))
+
 
 
 
