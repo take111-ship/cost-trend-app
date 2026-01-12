@@ -1,7 +1,8 @@
 streamlit
 pandas
+requests
 beautifulsoup4
 pdfplumber
-requests
+
 
 
