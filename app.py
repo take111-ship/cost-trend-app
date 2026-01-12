@@ -244,3 +244,89 @@ st.download_button(
     mime="text/csv",
 )
 
+import re
+
+E_STAT_APP_ID = st.secrets.get("E_STAT_APP_ID", "")
+if not E_STAT_APP_ID:
+    st.error("E_STAT_APP_ID が設定されていません（Streamlit Secretsに追加してください）")
+    st.stop()
+
+def fetch_estat_statsdata(stats_data_id: str, limit: int = 100000):
+    # e-Stat: getStatsData (JSON)
+    url = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
+    params = {
+        "appId": E_STAT_APP_ID,
+        "statsDataId": stats_data_id,
+        "metaGetFlg": "Y",   # メタ情報も一緒に取る（コード→日本語名の辞書に使う）
+        "cntGetFlg": "N",
+        "limit": limit,
+    }
+    r = requests.get(url, params=params, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+def estat_pick_series(json_data, industry_label_contains="製造業", item_label_contains="賃金指数"):
+    """
+    返ってきたJSONから、
+    - 産業分類で「製造業」
+    - 表章項目で「賃金指数（現金給与総額）」系
+    をざっくり選んで、時系列(series)にする。
+    """
+    root = json_data["GET_STATS_DATA"]["STATISTICAL_DATA"]
+    class_inf = root["CLASS_INF"]["CLASS_OBJ"]
+    values = root["DATA_INF"]["VALUE"]
+
+    # CLASS_OBJ を name→{code:label} に整形
+    def to_map(obj):
+        # obj["CLASS"] は list だったり dict だったりする
+        cls = obj["CLASS"]
+        if isinstance(cls, dict):
+            cls = [cls]
+        return {c["@code"]: c["@name"] for c in cls}
+
+    class_maps = {obj["@id"]: to_map(obj) for obj in class_inf}
+
+    # どの次元が「産業」「表章項目」かは統計表によって違うので
+    # VALUEの中のキー（例：@cat01, @cat02...）を見て総当たり気味に探す
+    # まず「製造業」というラベルを含むコード候補を全部集める
+    industry_codes = set()
+    item_codes = set()
+    for dim_id, cmap in class_maps.items():
+        for code, name in cmap.items():
+            if industry_label_contains in name:
+                industry_codes.add(code)
+            if item_label_contains in name:
+                item_codes.add(code)
+
+    # 実データをなめて、製造業×賃金指数っぽいものを拾う
+    rows = []
+    for v in values:
+        time = v.get("@time")
+        val = v.get("$")
+        # 各次元のコードを拾う（@cat01, @cat02... のようなもの）
+        dim_codes = [v[k] for k in v.keys() if k.startswith("@cat")]
+        if any(c in industry_codes for c in dim_codes) and (len(item_codes) == 0 or any(c in item_codes for c in dim_codes)):
+            rows.append((time, float(val)))
+
+    if not rows:
+        return pd.Series(dtype="float64")
+
+    s = pd.Series(
+        data=[x[1] for x in rows],
+        index=pd.to_datetime([x[0] for x in rows])
+    ).sort_index()
+
+    # 同じ月が重複することがあるので、最後を採用
+    s = s[~s.index.duplicated(keep="last")]
+    return s
+
+# ---- ここで実際に取得（例のstatsDataId）----
+estat_json = fetch_estat_statsdata("000008232508")  # 毎月勤労統計調査（産業別賃金指数の例）:contentReference[oaicite:6]{index=6}
+wage_mfg = estat_pick_series(estat_json, industry_label_contains="製造業", item_label_contains="賃金指数")
+
+st.subheader("製造業の賃金指標（e-Stat）")
+if wage_mfg.empty:
+    st.warning("製造業の系列が見つかりませんでした（表の選び方を調整します）")
+else:
+    st.line_chart(wage_mfg.rename("wage_index_mfg"))
+
