@@ -91,6 +91,51 @@ df.columns = ["copper_usd_ton", "aluminum_usd_ton", "usdjpy"]
 df["copper_jpy_kg"] = df["copper_usd_ton"] * df["usdjpy"] / 1000
 df["aluminum_jpy_kg"] = df["aluminum_usd_ton"] * df["usdjpy"] / 1000
 
+@st.cache_data(ttl=60*60)
+def fetch_estat(stats_data_id: str, params_extra: dict) -> pd.Series:
+    app_id = st.secrets.get("ESTAT_APP_ID", "")
+    if not app_id:
+        st.error("ESTAT_APP_ID が設定されていません（Streamlit Secretsを確認）")
+        st.stop()
+
+    url = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
+    params = {
+        "appId": app_id,
+        "statsDataId": stats_data_id,
+        # "cdCat01": "...",  # 指標（現金給与総額など）
+        # "cdCat02": "...",  # 産業（製造業）
+        # "metaGetFlg": "N",
+        "lang": "J",
+    }
+    params.update(params_extra)
+
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    # e-Statは構造が少し複雑なので、まずは値の入っている配列を取り出す
+    values = data["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
+
+    df = pd.DataFrame(values)
+    # df["$"] が数値、時間コードが "@time" などで入る（表により変わる）
+    # ここは「あなたが選んだ表」に合わせて列名を調整する
+    df["value"] = pd.to_numeric(df["$"], errors="coerce")
+
+    # 時間キーの候補（表により違うので順に試す）
+    time_key = None
+    for k in ["@time", "@TIME", "@cat03", "@cat01"]:
+        if k in df.columns:
+            time_key = k
+            break
+    if time_key is None:
+        raise ValueError("e-Statの時間キーが見つかりません。df.columns を確認してください。")
+
+    # 月次にする（YYYYMM 形式が多い）
+    df["date"] = pd.to_datetime(df[time_key].astype(str), format="%Y%m", errors="coerce")
+    s = df.dropna(subset=["date", "value"]).set_index("date")["value"].sort_index()
+    return s
+
+
 # ----------------------------
 # Latest / KPI
 # ----------------------------
@@ -198,3 +243,4 @@ st.download_button(
     file_name="copper_aluminum_jpy_per_kg_monthly.csv",
     mime="text/csv",
 )
+
