@@ -3,6 +3,8 @@ pandas
 requests
 beautifulsoup4
 pdfplumber
+matplotlib
+
 
 
 
