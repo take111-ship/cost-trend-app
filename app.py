@@ -454,23 +454,22 @@ def _save_series_chart_png(series: pd.Series, title: str, y_label: str, path: st
 def build_monthly_master(df_fred: pd.DataFrame, webkit: pd.Series, wage: pd.Series) -> pd.DataFrame:
     """
     df_fred: index=date, columns=[copper_jpy_kg, aluminum_jpy_kg] を想定
-    webkit, wage: index=date (月初) の Series
+    webkit, wage: index=date の Series（どちらも月次）
     """
     out = df_fred.copy()
-
-    # 月次indexへ寄せる（FREDは日付が月末/特定日になることがあるので月初に統一）
-    out = out.copy()
     out.index = pd.to_datetime(out.index)
-    out.index = out.index.to_period("M").to_timestamp("MS")
+
+    # 月次に寄せて「月初」に統一
+    out.index = out.index.to_period("M").to_timestamp(how="start")
 
     if webkit is not None and not webkit.empty:
         s = webkit.copy()
-        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp("MS")
+        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp(how="start")
         out["webkit_freight_index"] = s
 
     if wage is not None and not wage.empty:
         s = wage.copy()
-        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp("MS")
+        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp(how="start")
         out["wage_mfg"] = s
 
     out = out.sort_index()
@@ -583,6 +582,7 @@ st.download_button(
     file_name=f"cost_report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
 
 
 
