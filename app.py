@@ -6,6 +6,11 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from datetime import date, datetime
 import pdfplumber
+import tempfile
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils.dataframe import dataframe_to_rows
+
 
 # ----------------------------
 # Page / UI
@@ -120,8 +125,8 @@ def fetch_webkit_index_from_pdf(pdf_url: str) -> pd.Series:
         # 行から数値を全部拾う（年度名の中の数字も拾うので、12個だけ使う）
         nums = re.findall(r"\d+", ln)
         if len(nums) < 12:
-            # 12個ない行はスキップ（令和７年度みたいに途中までの可能性はあるので後で許容）
-            pass
+            continue
+
 
         # 年度ラベル抽出
         m = re.search(r"(平成|令和)\s*([0-9]+)\s*年度", ln)
@@ -428,4 +433,156 @@ else:
 
     except Exception as e:
         st.error(f"e-Stat取得でエラー: {e}")
+
+def _df_to_sheet(ws, df: pd.DataFrame, start_row=1, start_col=1):
+    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), start_row):
+        for c_idx, v in enumerate(row, start_col):
+            ws.cell(row=r_idx, column=c_idx, value=v)
+
+def _save_series_chart_png(series: pd.Series, title: str, y_label: str, path: str):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(series.index, series.values)
+    ax.scatter(series.index[-1], series.values[-1], s=120, zorder=3)
+    ax.set_title(title)
+    ax.set_xlabel("Month")
+    ax.set_ylabel(y_label)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+def build_monthly_master(df_fred: pd.DataFrame, webkit: pd.Series, wage: pd.Series) -> pd.DataFrame:
+    """
+    df_fred: index=date, columns=[copper_jpy_kg, aluminum_jpy_kg] を想定
+    webkit, wage: index=date (月初) の Series
+    """
+    out = df_fred.copy()
+
+    # 月次indexへ寄せる（FREDは日付が月末/特定日になることがあるので月初に統一）
+    out = out.copy()
+    out.index = pd.to_datetime(out.index)
+    out.index = out.index.to_period("M").to_timestamp("MS")
+
+    if webkit is not None and not webkit.empty:
+        s = webkit.copy()
+        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp("MS")
+        out["webkit_freight_index"] = s
+
+    if wage is not None and not wage.empty:
+        s = wage.copy()
+        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp("MS")
+        out["wage_mfg"] = s
+
+    out = out.sort_index()
+    return out
+
+def make_excel_report(master: pd.DataFrame) -> bytes:
+    """
+    master: 月次の統合データ
+    返り値: xlsxのバイナリ（st.download_button に渡せる）
+    """
+    wb = Workbook()
+    ws_sum = wb.active
+    ws_sum.title = "Summary"
+    ws_data = wb.create_sheet("Data")
+    ws_charts = wb.create_sheet("Charts")
+
+    # --- Summary（最新値と前月差）
+    latest = master.dropna(how="all").iloc[-1]
+    latest_month = master.dropna(how="all").index[-1].strftime("%Y-%m")
+
+    ws_sum["A1"] = "最新月"
+    ws_sum["B1"] = latest_month
+    ws_sum["A3"] = "指標"
+    ws_sum["B3"] = "最新値"
+    ws_sum["C3"] = "前月差"
+
+    # 前月差（列ごと）
+    rows = []
+    for col in master.columns:
+        s = master[col].dropna()
+        if s.empty:
+            continue
+        v_now = float(s.iloc[-1])
+        v_prev = float(s.iloc[-2]) if len(s) >= 2 else None
+        delta = v_now - v_prev if v_prev is not None else None
+        rows.append((col, v_now, delta))
+
+    for i, (name, v, d) in enumerate(rows, start=4):
+        ws_sum[f"A{i}"] = name
+        ws_sum[f"B{i}"] = v
+        ws_sum[f"C{i}"] = d
+
+    ws_sum["A14"] = "要因（メモ）"
+    ws_sum["A15"] = "・（ここは後でLLMで自動生成して埋めるのが一番価値出る）"
+
+    # --- Dataシート（表）
+    export = master.copy()
+    export = export.reset_index().rename(columns={"index": "month"})
+    export["month"] = pd.to_datetime(export["month"]).dt.strftime("%Y-%m")
+    _df_to_sheet(ws_data, export, start_row=1, start_col=1)
+
+    # --- Chartsシート（画像貼り付け）
+    # openpyxl は画像を「ファイル」経由で貼るのが安定なので一時ファイルを使う
+    with tempfile.TemporaryDirectory() as td:
+        # それぞれ存在する列だけ出す
+        chart_specs = []
+        if "copper_jpy_kg" in master.columns:
+            chart_specs.append(("copper_jpy_kg", "Copper (JPY/kg)", "JPY/kg"))
+        if "aluminum_jpy_kg" in master.columns:
+            chart_specs.append(("aluminum_jpy_kg", "Aluminum (JPY/kg)", "JPY/kg"))
+        if "webkit_freight_index" in master.columns:
+            chart_specs.append(("webkit_freight_index", "WebKIT Freight Index", "Index"))
+        if "wage_mfg" in master.columns:
+            chart_specs.append(("wage_mfg", "Manufacturing Wage", "Value"))
+
+        anchor_row = 1
+        for col, title, ylab in chart_specs:
+            s = master[col].dropna()
+            if s.empty:
+                continue
+
+            png = f"{td}/{col}.png"
+            _save_series_chart_png(s, title, ylab, png)
+
+            img = XLImage(png)
+            img.anchor = f"A{anchor_row}"
+            ws_charts.add_image(img)
+
+            # 次の画像の貼り付け位置（ざっくり下へ）
+            anchor_row += 22
+
+    # --- バイナリ化して返す
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+st.divider()
+st.subheader("📦 Excelレポート出力")
+
+# FRED由来のベース（円/kg列だけにする）
+df_fred = df[["copper_jpy_kg", "aluminum_jpy_kg"]].copy()
+
+# webkit / wage_mfg が未定義のケースを吸収
+try:
+    webkit_for_export = webkit
+except NameError:
+    webkit_for_export = pd.Series(dtype="float64")
+
+try:
+    wage_for_export = wage_mfg
+except NameError:
+    wage_for_export = pd.Series(dtype="float64")
+
+master = build_monthly_master(df_fred, webkit_for_export, wage_for_export)
+
+xlsx_bytes = make_excel_report(master)
+
+st.download_button(
+    label="⬇️ Excelレポートをダウンロード",
+    data=xlsx_bytes,
+    file_name=f"cost_report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+
 
