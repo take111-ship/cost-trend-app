@@ -516,8 +516,12 @@ def make_excel_report(master: pd.DataFrame) -> bytes:
     ws_sum["A15"] = "・（ここは後でLLMで自動生成して埋めるのが一番価値出る）"
 
     # --- Dataシート（表）
-    export = master.copy()
-    export = export.reset_index().rename(columns={"index": "month"})
+    export = master.copy().reset_index()
+
+    # 先頭列（元のindex）を必ず month にする（index名が何でもOK）
+    first_col = export.columns[0]
+    export = export.rename(columns={first_col: "month"})
+    
     export["month"] = pd.to_datetime(export["month"]).dt.strftime("%Y-%m")
     _df_to_sheet(ws_data, export, start_row=1, start_col=1)
 
@@ -582,6 +586,7 @@ st.download_button(
     file_name=f"cost_report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
 
 
 
