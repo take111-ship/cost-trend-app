@@ -4,6 +4,8 @@ requests
 beautifulsoup4
 pdfplumber
 matplotlib
+openpyxl
+
 
 
 
