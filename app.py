@@ -48,8 +48,6 @@ with st.sidebar:
 with st.expander("このダッシュボードについて", expanded=True):
     st.markdown("""
 - **銅・アルミ（円/kg）**：FREDの月次（USD/ton）× USDJPY ÷ 1000  
-- **運賃指数**：WebKIT成約運賃指数（PDF内の月別表）  
-- **賃金（製造業）**：e-Stat APIから取得（統計表ID=statsDataId を検索して利用）  
 - **Excel出力**：表示中データを統合し、表＋グラフ画像を添付したExcelを生成  
 """)
 
@@ -89,80 +87,6 @@ def fetch_fred(series_id: str, start: str = "2018-01-01") -> pd.Series:
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     s = df.dropna().set_index("date")["value"].sort_index()
     return s
-
-
-# ----------------------------
-# WebKIT (latest pdf URL from JTA page)
-# ----------------------------
-@st.cache_data(ttl=60 * 60)
-def webkit_latest_pdf_url() -> str:
-    url = "https://jta.or.jp/member/keiei/kit_release.html"
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    html = r.text
-
-    links = re.findall(r"/pdf/kit_release/(\d{6})\.pdf", html)
-    if not links:
-        raise ValueError("WebKITのPDFリンクが見つかりませんでした。ページ構造が変わった可能性があります。")
-
-    latest_yyyymm = max(links)  # YYYYMM なので文字列maxでOK
-    return f"https://jta.or.jp/pdf/kit_release/{latest_yyyymm}.pdf"
-
-
-@st.cache_data(ttl=60 * 60)
-def fetch_webkit_index_from_pdf(pdf_url: str) -> pd.Series:
-    r = requests.get(pdf_url, timeout=60)
-    r.raise_for_status()
-
-    with pdfplumber.open(io.BytesIO(r.content)) as pdf:
-        text = "\n".join((page.extract_text() or "") for page in pdf.pages)
-
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    target_rows = []
-    for ln in lines:
-        if re.match(r"^(平成|令和).+年度", ln):
-            target_rows.append(ln)
-
-    if not target_rows:
-        return pd.Series(dtype="float64")
-
-    data_points = []
-    for ln in target_rows:
-        nums = re.findall(r"\d+", ln)
-        if len(nums) < 12:
-            # ★重要：スキップ
-            continue
-
-        m = re.search(r"(平成|令和)\s*([0-9]+)\s*年度", ln) or re.search(r"(平成|令和)([0-9]+)年度", ln)
-        if not m:
-            continue
-
-        era = m.group(1)
-        n = int(m.group(2))
-
-        # 年度開始（4月開始）
-        if era == "令和":
-            start_year = 2018 + n   # 令和1=2019
-        else:
-            start_year = 1988 + n   # 平成1=1989
-
-        # 行末側から12個（4月〜3月）
-        month_vals = list(map(int, nums[-12:]))
-
-        months = list(range(4, 13)) + [1, 2, 3]
-        years = [start_year] * 9 + [start_year + 1] * 3
-
-        for y, mo, v in zip(years, months, month_vals):
-            data_points.append((pd.Timestamp(y, mo, 1), float(v)))
-
-    if not data_points:
-        return pd.Series(dtype="float64")
-
-    s = pd.Series({d: v for d, v in data_points}).sort_index()
-    s = s[~s.index.duplicated(keep="last")]
-    return s
-
 
 
 # ----------------------------
@@ -395,4 +319,5 @@ try:
 
 except Exception as e:
     st.error(f"Excel出力でエラー: {e}")
+
 
