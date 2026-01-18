@@ -1,12 +1,10 @@
 # app.py
-import re
 import io
 import requests
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 from datetime import date, datetime
-import pdfplumber
 
 # Excel export
 from openpyxl import Workbook
@@ -53,12 +51,6 @@ FRED_API_KEY = st.secrets.get("FRED_API_KEY", "")
 if not FRED_API_KEY:
     st.error("FRED_API_KEY が設定されていません（Streamlit Secrets を確認）")
     st.stop()
-
-ESTAT_APP_ID = st.secrets.get("ESTAT_APP_ID", "")
-if not ESTAT_APP_ID:
-    st.warning("ESTAT_APP_ID が未設定です（賃金パートは動きません）。Streamlit Secrets に追加してください。")
-
-
 # ----------------------------
 # FRED fetch
 # ----------------------------
@@ -133,23 +125,12 @@ def _series_chart_png_bytes(series: pd.Series, title: str, y_label: str) -> byte
     return buf.getvalue()
 
 
-def build_monthly_master(df_fred: pd.DataFrame, webkit: pd.Series, wage: pd.Series) -> pd.DataFrame:
+def build_monthly_master(df_fred: pd.DataFrame) -> pd.DataFrame:
     out = df_fred.copy()
     out.index = pd.to_datetime(out.index)
     # 月次へ寄せて月初に統一（pandas互換：how="start"）
     out.index = out.index.to_period("M").to_timestamp(how="start")
     out.index.name = "month"
-
-    if webkit is not None and not webkit.empty:
-        s = webkit.copy()
-        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp(how="start")
-        out["webkit_freight_index"] = s
-
-    if wage is not None and not wage.empty:
-        s = wage.copy()
-        s.index = pd.to_datetime(s.index).to_period("M").to_timestamp(how="start")
-        out["wage_mfg"] = s
-
     return out.sort_index()
 
 
@@ -207,11 +188,7 @@ def make_excel_report(master: pd.DataFrame) -> bytes:
         chart_specs.append(("copper_jpy_kg", "Copper (JPY/kg)", "JPY/kg"))
     if "aluminum_jpy_kg" in master.columns:
         chart_specs.append(("aluminum_jpy_kg", "Aluminum (JPY/kg)", "JPY/kg"))
-    if "webkit_freight_index" in master.columns:
-        chart_specs.append(("webkit_freight_index", "WebKIT Freight Index", "Index"))
-    if "wage_mfg" in master.columns:
-        chart_specs.append(("wage_mfg", "Manufacturing Wage", "Value"))
-
+   
     anchor_row = 1
     for col, title, ylab in chart_specs:
         s = master[col].dropna()
@@ -226,14 +203,6 @@ def make_excel_report(master: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
     wb.save(bio)
     return bio.getvalue()
-
-
-# ----------------------------
-# Initialize variables for export safety
-# ----------------------------
-webkit = pd.Series(dtype="float64")
-wage_mfg = pd.Series(dtype="float64")
-
 
 # ----------------------------
 # 1) Copper / Aluminum (FRED)
@@ -298,7 +267,7 @@ st.subheader("📦 Excelレポート出力（表＋グラフ画像）")
 
 try:
     df_fred = df[["copper_jpy_kg", "aluminum_jpy_kg"]].copy()
-    master = build_monthly_master(df_fred, webkit, wage_mfg)
+    master = build_monthly_master(df_fred)
 
     xlsx_bytes = make_excel_report(master)
 
@@ -313,6 +282,7 @@ try:
 
 except Exception as e:
     st.error(f"Excel出力でエラー: {e}")
+
 
 
 
