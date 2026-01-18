@@ -28,7 +28,7 @@ st.set_page_config(
 )
 
 st.title("📈 原価ダッシュボード（銅・アルミ・運賃・賃金）")
-st.caption("銅/アルミはFRED（USD/ton）×USDJPYで円/kg換算。運賃はWebKIT PDF。賃金はe-Stat API。")
+st.caption("銅/アルミはFRED（USD/ton）×USDJPYで円/kg換算。")
 
 with st.sidebar:
     st.header("📚 データ元リンク（固定表示）")
@@ -36,13 +36,7 @@ with st.sidebar:
 **■ FRED**
 - 銅（USD/ton）: https://fred.stlouisfed.org/series/PCOPPUSDM  
 - アルミ（USD/ton）: https://fred.stlouisfed.org/series/PALUMUSDM  
-- 為替（USD/JPY）: https://fred.stlouisfed.org/series/EXJPUS  
-
-**■ WebKIT（全ト協）**
-- 公表ページ: https://jta.or.jp/member/keiei/kit_release.html  
-
-**■ e-Stat API**
-- 仕様/案内: https://www.e-stat.go.jp/api/api-info/e-stat-manual  
+- 為替（USD/JPY）: https://fred.stlouisfed.org/series/EXJPUS   
 """)
 
 with st.expander("このダッシュボードについて", expanded=True):
@@ -319,5 +313,6 @@ try:
 
 except Exception as e:
     st.error(f"Excel出力でエラー: {e}")
+
 
 
